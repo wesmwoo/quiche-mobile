@@ -37,6 +37,10 @@ use std::cell::RefCell;
 
 use ring::rand::*;
 
+use local_ip_address::local_ip;
+use local_ip_address::list_afinet_netifas;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 #[derive(Debug)]
@@ -52,6 +56,24 @@ pub fn connect(
 ) -> Result<(), ClientError> {
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
+
+    println!("local ip address {}", local_ip().unwrap());
+
+    let mut local_ip = local_ip().unwrap();
+    let enable_ip_migration = false;
+    let enable_enhanced_ip_mig = enable_ip_migration && false;
+
+    let mut network_interfaces = list_afinet_netifas().unwrap();
+    for (name, ip) in network_interfaces.iter() {
+        if name == "enp0s8" {
+            local_ip = *ip;
+        }
+    }
+
+    let mut ip_migrate_bool = false;
+    let mut test_ip = local_ip;
+
+    println!("local_ip {} {}", local_ip, local_ip == IpAddr::V4(Ipv4Addr::new(172, 29, 73, 111)));
 
     let output_sink =
         Rc::new(RefCell::new(output_sink)) as Rc<RefCell<dyn FnMut(_)>>;
@@ -97,6 +119,8 @@ pub fn connect(
     } else {
         None
     };
+
+    let mut ip_mig_socket = None;
 
     // Create the configuration for the QUIC connection.
     let mut config = quiche::Config::new(args.version).unwrap();
@@ -253,10 +277,13 @@ pub fn connect(
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
         for event in &events {
+
             let socket = match event.token() {
                 mio::Token(0) => &socket,
 
                 mio::Token(1) => migrate_socket.as_ref().unwrap(),
+                    
+                mio::Token(2) => ip_mig_socket.as_ref().unwrap(),
 
                 _ => unreachable!(),
             };
@@ -466,6 +493,30 @@ pub fn connect(
             scid_sent = true;
         }
 
+        network_interfaces = list_afinet_netifas().unwrap();
+        for (name, ip) in network_interfaces.iter() {
+            if name == "enp0s8" {
+                test_ip = *ip;
+            }
+        }
+        
+        // Below is for an incomplete implementation of "simple" IP migration support -- TODO
+        // consume a connection ID
+        if test_ip != local_ip && enable_ip_migration {
+            println!("test_ip not equal to local! {:?} {:?} ", test_ip, local_ip);
+            local_ip = test_ip;
+            println!("test_ip is now: {:?}", test_ip);
+            let mut new_ip_socket = mio::net::UdpSocket::bind(bind_addr.parse().unwrap()).unwrap();
+            poll.registry().register(&mut new_ip_socket, mio::Token(2), mio::Interest::READABLE).unwrap();
+            ip_mig_socket = Some(new_ip_socket);
+            ip_migrate_bool = true;
+            // TODO figure out how to retire a destination CID
+            // This will be done by defining a new lib.rs function to 
+            // retire "active" destination cid (destination id of active path)
+            
+            // See lib.rs:5764 pub fn retire_destination_cid
+        }
+
         if args.perform_migration &&
             !new_path_probed &&
             scid_sent &&
@@ -478,11 +529,30 @@ pub fn connect(
             new_path_probed = true;
         }
 
+        // Below is for adding additional timely path probing to IP migration support
+        if ip_migrate_bool &&
+            !new_path_probed &&
+            scid_sent &&
+            conn.available_dcids() > 0 &&
+            enable_ip_migration &&
+            enable_enhanced_ip_mig
+        {
+            println!("got inside loop");
+            let new_local_addr =
+                ip_mig_socket.as_ref().unwrap().local_addr().unwrap();
+            conn.probe_path(new_local_addr, peer_addr).unwrap();
+            new_path_probed = true;
+        }
+
         // Generate outgoing QUIC packets and send them on the UDP socket, until
         // quiche reports that there are no more packets to be sent.
         let mut sockets = vec![&socket];
         if let Some(migrate_socket) = migrate_socket.as_ref() {
             sockets.push(migrate_socket);
+        }
+
+        if let Some(ip_mig_socket) = ip_mig_socket.as_ref() {
+            sockets.push(ip_mig_socket);
         }
 
         for socket in sockets {

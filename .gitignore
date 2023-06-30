@@ -2,3 +2,10 @@
 **/*.rs.bk
 **/Cargo.lock
 **/*.*qlog
+**/examples/build
+**/*.txt
+**/*.log
+**/examples/http3-server
+**/examples/http3-client
+**/examples/client
+**/examples/server
