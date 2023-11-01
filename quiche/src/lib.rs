@@ -5450,11 +5450,12 @@ impl Connection {
     ///
     /// If no timeout has occurred it does nothing.
     pub fn on_timeout(&mut self) {
+        info!("on_timeout called");
         let now = time::Instant::now();
 
         if let Some(draining_timer) = self.draining_timer {
             if draining_timer <= now {
-                trace!("{} draining timeout expired", self.trace_id);
+                info!("{} draining timeout expired", self.trace_id);
 
                 qlog_with!(self.qlog, q, {
                     q.finish_log().ok();
@@ -5471,7 +5472,7 @@ impl Connection {
 
         if let Some(timer) = self.idle_timer {
             if timer <= now {
-                trace!("{} idle timeout expired", self.trace_id);
+                info!("{} idle timeout expired", self.trace_id);
 
                 qlog_with!(self.qlog, q, {
                     q.finish_log().ok();
@@ -5501,7 +5502,7 @@ impl Connection {
         for (_, p) in self.paths.iter_mut() {
             if let Some(timer) = p.recovery.loss_detection_timer() {
                 if timer <= now {
-                    trace!("{} loss detection timeout expired", self.trace_id);
+                    info!("{} loss detection timeout expired", self.trace_id);
 
                     let (lost_packets, lost_bytes) = p.on_loss_detection_timeout(
                         handshake_status,
@@ -5573,6 +5574,7 @@ impl Connection {
     pub fn probe_path(
         &mut self, local_addr: SocketAddr, peer_addr: SocketAddr,
     ) -> Result<u64> {
+        println!("probe path called");
         // We may want to probe an existing path.
         let pid = match self.paths.path_id_from_addrs(&(local_addr, peer_addr)) {
             Some(pid) => pid,

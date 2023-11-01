@@ -35,6 +35,13 @@ use std::rc::Rc;
 
 use std::cell::RefCell;
 
+use std::{thread, time};
+use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::io::{self, Read, Write};
+use mio::unix::pipe;
+
 use ring::rand::*;
 
 use local_ip_address::local_ip;
@@ -57,23 +64,26 @@ pub fn connect(
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    println!("local ip address {}", local_ip().unwrap());
+    println!("local ip address {}", local_ip_address::local_ip().unwrap());
 
+    // Set up state logic for detecting change in IP
     let mut local_ip = local_ip().unwrap();
     let enable_ip_migration = false;
-    let enable_enhanced_ip_mig = enable_ip_migration && false;
+    let enable_enhanced_ip_mig = enable_ip_migration && true;
 
     let mut network_interfaces = list_afinet_netifas().unwrap();
     for (name, ip) in network_interfaces.iter() {
-        if name == "enp0s8" {
-            local_ip = *ip;
-        }
+       if name == "enp0s8" {
+           local_ip = *ip;
+       }
+       println!("[initial] name: {} ip: {}", name, ip);
     }
 
+    // TODO turn this variable into a shared?
     let mut ip_migrate_bool = false;
     let mut test_ip = local_ip;
 
-    println!("local_ip {} {}", local_ip, local_ip == IpAddr::V4(Ipv4Addr::new(172, 29, 73, 111)));
+    // println!("local_ip {} {}", local_ip, local_ip == IpAddr::V4(Ipv4Addr::new(172, 29, 73, 111)));
 
     let output_sink =
         Rc::new(RefCell::new(output_sink)) as Rc<RefCell<dyn FnMut(_)>>;
@@ -260,23 +270,95 @@ pub fn connect(
     let mut new_path_probed = false;
     let mut migrated = false;
 
+    let mut i = 0;
+
+    // Set up signalling for managing concurrent thread
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_me = stop.clone();
+    const PIPE_RECV: mio::Token = mio::Token(4);
+
+    let (mut sender, mut receiver) = pipe::new().unwrap();
+
+    poll.registry().register(&mut receiver, PIPE_RECV, mio::Interest::READABLE).unwrap(); 
+
+    if enable_enhanced_ip_mig {
+        // Set up the thread for detecting changes in IP address
+        let handle = thread::spawn(move || {
+            let mut i = 0;
+            
+            let mut original_ip = local_ip_address::local_ip().unwrap();
+
+            let mut network_interfaces = list_afinet_netifas().unwrap();
+            for (name, ip) in network_interfaces.iter() {
+                if name == "enp0s8" {
+                original_ip = *ip;
+                }
+                info!("[thread] [initial] name: {} ip: {}", name, ip);
+            }
+
+            let mut ip_migrate_bool = false;
+            let mut test_ip = original_ip;
+
+            
+            loop {
+                thread::sleep(Duration::from_millis(5));
+                i += 1;
+                network_interfaces = list_afinet_netifas().unwrap();
+                for (name, ip) in network_interfaces.iter() {
+                    if name == "enp0s8" {
+                        test_ip = *ip; // TODO this logic fails with multiple IPs...
+                    }
+                    println!("[thread] [check] name: {} ip: {}", name, ip);
+                    info!("[thread] [check] name: {} ip: {}", name, ip);
+                }
+            
+                // Below is for an incomplete implementation of "simple" IP migration support -- TODO
+                // consume a connection ID
+                println!("[thread] test_ip: {} original_ip: {}, are_equal is {}", test_ip, original_ip, test_ip == original_ip);
+                // info!("[thread] test_ip: {} original_ip: {}, are_equal is {}", test_ip, original_ip, test_ip == original_ip);
+                if test_ip != original_ip {
+                    println!("[thread] test_ip not equal to local! {:?} {:?} ", test_ip, original_ip);
+                    info!("[thread] test_ip not equal to local! {:?} {:?} ", test_ip, original_ip);
+                    original_ip = test_ip;
+                    info!("[thread] test_ip is now: {:?}", test_ip);
+                    println!("[thread] test_ip is now: {:?}", test_ip);
+                    // TODO: fire an event that is registered with the poll?
+                    drop(sender);
+                    println!("[thread] dropped sender");
+                    break;
+                }
+                info!("[thread] iterations = {}", i);
+                if stop_me.load(Ordering::Relaxed) {
+                    info!("iterations = {}", i);
+                    break;
+                }
+            }
+        });
+    }
+
     loop {
         if !conn.is_in_early_data() || app_proto_selected {
             poll.poll(&mut events, conn.timeout()).unwrap();
         }
+
 
         // If the event loop reported no events, it means that the timeout
         // has expired, so handle it without attempting to read packets. We
         // will then proceed with the send loop.
         if events.is_empty() {
             trace!("timed out");
-
             conn.on_timeout();
         }
 
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
         for event in &events {
+
+            if event.is_read_closed() {
+                info!("sender dropped");
+                println!("sender dropped");
+                continue;
+            }
 
             let socket = match event.token() {
                 mio::Token(0) => &socket,
@@ -342,6 +424,11 @@ pub fn connect(
         trace!("done reading");
 
         if conn.is_closed() {
+            // Join the IP change detection thread
+            // handle.join().unwrap();
+            stop.store(true, Ordering::Relaxed);
+            info!("Stop set to true -- thread should close");
+
             info!(
                 "connection closed, {:?} {:?}",
                 conn.stats(),
@@ -493,11 +580,15 @@ pub fn connect(
             scid_sent = true;
         }
 
+
+        // test_ip = local_ip_address::local_ip().unwrap();
+
         network_interfaces = list_afinet_netifas().unwrap();
         for (name, ip) in network_interfaces.iter() {
             if name == "enp0s8" {
                 test_ip = *ip;
             }
+            println!("name: {} ip: {}", name, ip);
         }
         
         // Below is for an incomplete implementation of "simple" IP migration support -- TODO
@@ -522,6 +613,7 @@ pub fn connect(
             scid_sent &&
             conn.available_dcids() > 0
         {
+            println!("probing path");
             let additional_local_addr =
                 migrate_socket.as_ref().unwrap().local_addr().unwrap();
             conn.probe_path(additional_local_addr, peer_addr).unwrap();
@@ -530,6 +622,7 @@ pub fn connect(
         }
 
         // Below is for adding additional timely path probing to IP migration support
+        println!("migrate args: bool {} not probed {} sent {} avail {} enable {} enhanced {}", ip_migrate_bool, !new_path_probed, scid_sent, conn.available_dcids(), enable_ip_migration, enable_enhanced_ip_mig);
         if ip_migrate_bool &&
             !new_path_probed &&
             scid_sent &&
@@ -614,7 +707,12 @@ pub fn connect(
         }
 
         if conn.is_closed() {
-            info!(
+           // Join the IP change detection thread
+           //handle.join().unwrap();
+           stop.store(true, Ordering::Relaxed);
+           info!("Stop set to True -- thread should terminate");
+
+           info!(
                 "connection closed, {:?} {:?}",
                 conn.stats(),
                 conn.path_stats().collect::<Vec<quiche::PathStats>>()
