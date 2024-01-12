@@ -237,7 +237,7 @@ impl Default for CommonArgs {
             dgrams_enabled: false,
             dgram_count: 0,
             dgram_data: "quack".to_string(),
-            max_active_cids: 2,
+            max_active_cids: 4,
             enable_active_migration: false,
             max_field_section_size: None,
             qpack_max_table_capacity: None,

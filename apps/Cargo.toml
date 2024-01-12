@@ -31,6 +31,11 @@ ring = "0.17"
 quiche = { path = "../quiche" }
 libc = "0.2"
 nix = { version = "0.27", features = ["net", "socket", "uio"] }
+futures = "^0.3"
+tokio = {version = "1", features = ["full"]}
+netlink-packet-route = "=0.14.1"
+netlink-packet-core = "=0.5.0"
+netlink-proto = "=0.11.1"
 
 [lib]
 crate-type = ["lib"]

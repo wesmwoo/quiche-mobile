@@ -37,6 +37,8 @@ use std::cell::RefCell;
 
 use ring::rand::*;
 
+use std::net::Ipv4Addr;
+
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 #[derive(Debug)]
@@ -97,6 +99,21 @@ pub fn connect(
     } else {
         None
     };
+
+    // Set up UDP socket for listening to mobman broadcasts
+    let sub_addr = "0.0.0.0:1900";
+    let mc_addr = Ipv4Addr::new(224, 0, 0, 0);
+    let if_addr = Ipv4Addr::UNSPECIFIED;
+    let mut mm_socket =
+        mio::net::UdpSocket::bind(sub_addr.parse().unwrap()).unwrap();
+
+    mm_socket.join_multicast_v4(&mc_addr, &if_addr);
+    
+    poll.registry()
+        .register(&mut mm_socket, mio::Token(2), mio::Interest::READABLE)
+        .unwrap();
+
+    let bc_buf = [0; 65535];
 
     // Create the configuration for the QUIC connection.
     let mut config = quiche::Config::new(args.version).unwrap();
@@ -269,8 +286,20 @@ pub fn connect(
 
                 mio::Token(1) => migrate_socket.as_ref().unwrap(),
 
+                mio::Token(2) => &socket,
+
                 _ => unreachable!(),
             };
+
+            if event.token() == mio::Token(2) {
+                let number_bytes = mm_socket.recv(&mut buf).expect("failure!");
+                let filled_buf = &mut buf[..number_bytes];
+                let added_ip = String::from_utf8(filled_buf.to_vec()).unwrap();
+            
+                println!("[mobman] added IP: {}", added_ip);
+                conn.probe_path(socket.local_addr().unwrap(), peer_addr);
+                continue;
+            }
 
             let local_addr = socket.local_addr().unwrap();
             'read: loop {
