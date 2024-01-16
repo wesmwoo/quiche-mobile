@@ -1,4 +1,13 @@
 use std::net::Ipv4Addr;
+use std::os::unix::net::UnixStream;
+use std::io::prelude::*;
+
+use std::io;
+use std::os::unix::net::UnixDatagram;
+use std::thread;
+
+const SOCKET_PATH_PREFIX: &str = "/tmp/client_";
+const BUFFER_SIZE: usize = 256;
 
 pub async fn mobman() -> Result<(), String> {
     let mut poll = mio::Poll::new().unwrap();
@@ -33,4 +42,36 @@ pub async fn mobman() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub async fn mobman_unix() -> std::io::Result<()> {
+
+    // Generate a unique socket path for the client
+    let unique_socket_path = format!("{}{}", SOCKET_PATH_PREFIX, std::process::id());
+
+    // Create a Unix domain datagram socket
+    let client_socket = UnixDatagram::bind(&unique_socket_path)?;
+
+    // Set up server address
+    let server_address = "/tmp/netmon_pubsub_server";
+
+    // Subscribe to the server
+    client_socket.send_to(b"subscribe", server_address)?;
+
+    let mut buffer = [0; BUFFER_SIZE];
+    loop {
+        match client_socket.recv_from(&mut buffer) {
+            Ok((bytes_received, _)) => {
+                let message = String::from_utf8_lossy(&buffer[..bytes_received]);
+                println!("Received message: {}", message);
+            }
+            Err(err) => {
+                eprintln!("Error receiving message: {}", err);
+                break;
+            }
+        }
+    }
+
+    println!("You probably didn't start the netmon server");
+    Ok(())    
 }

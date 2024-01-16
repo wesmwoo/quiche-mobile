@@ -26,6 +26,7 @@
 
 use crate::args::*;
 use crate::common::*;
+use crate::mobconn::*;
 
 use std::net::ToSocketAddrs;
 
@@ -100,20 +101,20 @@ pub fn connect(
         None
     };
 
-    // Set up UDP socket for listening to mobman broadcasts
-    let sub_addr = "0.0.0.0:1900";
-    let mc_addr = Ipv4Addr::new(224, 0, 0, 0);
-    let if_addr = Ipv4Addr::UNSPECIFIED;
-    let mut mm_socket =
-        mio::net::UdpSocket::bind(sub_addr.parse().unwrap()).unwrap();
+    // // Set up UDP socket for listening to mobman broadcasts
+    // let sub_addr = "0.0.0.0:1900";
+    // let mc_addr = Ipv4Addr::new(224, 0, 0, 0);
+    // let if_addr = Ipv4Addr::UNSPECIFIED;
+    // let mut mm_socket =
+    //     mio::net::UdpSocket::bind(sub_addr.parse().unwrap()).unwrap();
 
-    mm_socket.join_multicast_v4(&mc_addr, &if_addr);
+    // mm_socket.join_multicast_v4(&mc_addr, &if_addr);
     
-    poll.registry()
-        .register(&mut mm_socket, mio::Token(2), mio::Interest::READABLE)
-        .unwrap();
+    // poll.registry()
+    //     .register(&mut mm_socket, mio::Token(2), mio::Interest::READABLE)
+    //     .unwrap();
 
-    let bc_buf = [0; 65535];
+    // let bc_buf = [0; 65535];
 
     // Create the configuration for the QUIC connection.
     let mut config = quiche::Config::new(args.version).unwrap();
@@ -205,6 +206,13 @@ pub fn connect(
     )
     .unwrap();
 
+    let mut mobconn = MobileConnection::new();
+    // let mut mc_receiver = mobconn.receiver;
+    let mut mc_receiver = mobconn.get_receiver();
+
+    // register the mc_receiver to be signalled by poll.poll()
+    poll.registry().register(&mut mc_receiver, mio::Token(4), mio::Interest::READABLE).unwrap(); 
+
     if let Some(keylog) = &mut keylog {
         if let Ok(keylog) = keylog.try_clone() {
             conn.set_keylog(Box::new(keylog));
@@ -281,6 +289,33 @@ pub fn connect(
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
         for event in &events {
+
+            // this means we detected a mobility event
+            if event.token() == mio::Token(4) {
+                let mut pipe_buf = [0; 11];
+                let mut n = mc_receiver.read(&mut pipe_buf).unwrap();
+                println!("received: {:?}", &pipe_buf[0..n]);
+                // let msg_str = std::str::from_utf8(&pipe_buf[0..n]).unwrap();
+                println!("msg_str: {}", &pipe_buf[0]);
+                
+                if pipe_buf[0] == b"s"[0] {
+                    println!("--> blocking until mobility event ends");
+                    mc_receiver.set_nonblocking(false);
+                    n = mc_receiver.read(&mut pipe_buf).unwrap();
+                    mc_receiver.set_nonblocking(true);
+                    if pipe_buf[0] == b"e"[0] {
+                        println!("--> mobility event complete; proceed with connection");
+                    } else {
+                        println!("something went wrong with the mobility event");
+                    }
+                }
+                
+                // mobconn.handle_detected_migration(&mut conn, socket.local_addr().unwrap(), peer_addr);
+                conn.probe_path(socket.local_addr().unwrap(), peer_addr).unwrap();
+
+                continue;
+            }
+
             let socket = match event.token() {
                 mio::Token(0) => &socket,
 
@@ -291,15 +326,15 @@ pub fn connect(
                 _ => unreachable!(),
             };
 
-            if event.token() == mio::Token(2) {
-                let number_bytes = mm_socket.recv(&mut buf).expect("failure!");
-                let filled_buf = &mut buf[..number_bytes];
-                let added_ip = String::from_utf8(filled_buf.to_vec()).unwrap();
+            // if event.token() == mio::Token(2) {
+            //     let number_bytes = mm_socket.recv(&mut buf).expect("failure!");
+            //     let filled_buf = &mut buf[..number_bytes];
+            //     let added_ip = String::from_utf8(filled_buf.to_vec()).unwrap();
             
-                println!("[mobman] added IP: {}", added_ip);
-                conn.probe_path(socket.local_addr().unwrap(), peer_addr);
-                continue;
-            }
+            //     println!("[mobman] added IP: {}", added_ip);
+            //     conn.probe_path(socket.local_addr().unwrap(), peer_addr);
+            //     continue;
+            // }
 
             let local_addr = socket.local_addr().unwrap();
             'read: loop {
